@@ -1,30 +1,3 @@
-/*
- * This file is part of the µOS++ distribution.
- *   (https://github.com/micro-os-plus)
- * Copyright (c) 2014 Liviu Ionescu.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use,
- * copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following
- * conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
- * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
- * OTHER DEALINGS IN THE SOFTWARE.
- */
-
 //
 // This file is part of the GNU ARM Eclipse distribution.
 // Copyright (c) 2014 Liviu Ionescu.
@@ -121,9 +94,9 @@ void SystemClock48MHz( void )
 
 /*****************************************************************/
 
+int first_edge = 1;
 
-int
-main(int argc, char* argv[])
+int main(int argc, char* argv[])
 {
 
 	SystemClock48MHz();
@@ -137,9 +110,12 @@ main(int argc, char* argv[])
 	myTIM2_Init();		/* Initialize timer TIM2 */
 	myEXTI_Init();		/* Initialize EXTI */
 
+
 	while (1)
 	{
 		// Nothing is going on here...
+
+
 	}
 
 	return 0;
@@ -151,12 +127,15 @@ void myGPIOB_Init()
 {
 	/* Enable clock for GPIOB peripheral */
 	// Relevant register: RCC->AHBENR
+	RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
 
 	/* Configure PB2 as input */
 	// Relevant register: GPIOB->MODER
+	GPIOB->MODER &= ~(GPIO_MODER_MODER2_Msk);
 
 	/* Ensure no pull-up/pull-down for PB2 */
 	// Relevant register: GPIOB->PUPDR
+	GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR2_Msk);
 }
 
 
@@ -164,10 +143,16 @@ void myTIM2_Init()
 {
 	/* Enable clock for TIM2 peripheral */
 	// Relevant register: RCC->APB1ENR
+	RCC->APB1ENR |= RCC_APB1ENR_TIM2EN_Msk;
 
 	/* Configure TIM2: buffer auto-reload, count up, stop on overflow,
 	 * enable update events, interrupt on overflow only */
 	// Relevant register: TIM2->CR1
+	TIM2->CR1 |= TIM_CR1_ARPE_Msk; // buffer auto reload enabled
+	TIM2->CR1 &= ~(TIM_CR1_DIR_Msk); // count up
+	TIM2->CR1 |= TIM_CR1_OPM_Msk; // stop on next update event
+	TIM2->CR1 &= ~(TIM_CR1_UDIS_Msk); // enable update events
+	TIM2->CR1 |= TIM_CR1_URS_Msk; // update interrupt on overflow only
 
 	/* Set clock prescaler value */
 	TIM2->PSC = myTIM2_PRESCALER;
@@ -176,15 +161,19 @@ void myTIM2_Init()
 
 	/* Update timer registers */
 	// Relevant register: TIM2->EGR
+	TIM2->EGR |= TIM_EGR_UG_Msk;
 
 	/* Assign TIM2 interrupt priority = 0 in NVIC */
 	// Relevant register: NVIC->IP[3], or use NVIC_SetPriority
+	NVIC_SetPriority(TIM2_IRQn, 0);
 
 	/* Enable TIM2 interrupts in NVIC */
 	// Relevant register: NVIC->ISER[0], or use NVIC_EnableIRQ
+	NVIC_EnableIRQ(TIM2_IRQn);
 
 	/* Enable update interrupt generation */
 	// Relevant register: TIM2->DIER
+	TIM2->DIER |= TIM_DIER_TIE_Msk;
 }
 
 
@@ -192,18 +181,24 @@ void myEXTI_Init()
 {
 	/* Map EXTI2 line to PB2 */
 	// Relevant register: SYSCFG->EXTICR[0]
+	SYSCFG->EXTICR[0] |= (SYSCFG_EXTICR1_EXTI2_PB);
 
 	/* EXTI2 line interrupts: set rising-edge trigger */
 	// Relevant register: EXTI->RTSR
+	EXTI->RTSR |= EXTI_RTSR_TR2_Msk;
 
 	/* Unmask interrupts from EXTI2 line */
 	// Relevant register: EXTI->IMR
+	EXTI->IMR |= EXTI_IMR_MR2_Msk;
 
 	/* Assign EXTI2 interrupt priority = 0 in NVIC */
 	// Relevant register: NVIC->IP[2], or use NVIC_SetPriority
+	NVIC_SetPriority(EXTI2_3_IRQn, 0);
 
 	/* Enable EXTI2 interrupts in NVIC */
 	// Relevant register: NVIC->ISER[0], or use NVIC_EnableIRQ
+	NVIC_EnableIRQ(EXTI2_3_IRQn);
+
 }
 
 
@@ -217,9 +212,11 @@ void TIM2_IRQHandler()
 
 		/* Clear update interrupt flag */
 		// Relevant register: TIM2->SR
+		TIM2->SR &= ~(TIM_SR_UIF_Msk);
 
 		/* Restart stopped timer */
 		// Relevant register: TIM2->CR1
+		TIM2->CR1 |= TIM_CR1_CEN_Msk;
 	}
 }
 
@@ -228,10 +225,31 @@ void TIM2_IRQHandler()
 void EXTI2_3_IRQHandler()
 {
 	// Declare/initialize your local variables here...
+	float timer;
+	float period;
+	float frequency;
 
 	/* Check if EXTI2 interrupt pending flag is indeed set */
 	if ((EXTI->PR & EXTI_PR_PR2) != 0)
 	{
+
+		if (first_edge) {
+			TIM2->CNT = 0x00;
+			TIM2->CR1 |= TIM_CR1_CEN_Msk;
+			first_edge = 0;
+		} else {
+			TIM2->CR1 &= ~(TIM_CR1_CEN_Msk);
+			timer = TIM2->CNT;
+
+			period = timer / 48000000;
+			frequency = 1/(timer / 48000000);
+
+			trace_printf("Signal Period: %.3f seconds\n", period);
+			trace_printf("Signal Frequency: %.3f Hz\n", frequency);
+			first_edge = 1;
+		}
+		EXTI->PR = EXTI_PR_PR2;
+
 		//
 		// 1. If this is the first edge:
 		//	- Clear count register (TIM2->CNT).
@@ -255,3 +273,5 @@ void EXTI2_3_IRQHandler()
 
 
 #pragma GCC diagnostic pop
+
+// ----------------------------------------------------------------------------
