@@ -46,6 +46,8 @@
 /* Maximum possible setting for overflow */
 #define myTIM2_PERIOD ((uint32_t)0xFFFFFFFF)
 
+void myADC_Init(void);
+void myDAC_Init(void);
 void myGPIOA_Init(void);
 void myGPIOB_Init(void);
 void myTIM2_Init(void);
@@ -106,6 +108,8 @@ int main(int argc, char* argv[])
 	trace_printf("System clock: %u Hz\n", SystemCoreClock);
 
         RCC->APB2ENR |= RCC_APB2ENR_SYSCFGCOMPEN;  /* Enable SYSCFG clock */
+    myADC_Init();		/* Initialize ADC */
+    myDAC_Init();		/* Initialize DAC */
     myGPIOA_Init();		/* Initialize I/O port PA */
 	myGPIOB_Init();		/* Initialize I/O port PB */
 	myTIM2_Init();		/* Initialize timer TIM2 */
@@ -123,6 +127,18 @@ int main(int argc, char* argv[])
 
 }
 
+// CONFIGURE ADC AND DAC PROPERLY
+
+void myADC_Init() {
+	/* Enable clock for ADC */
+	RCC->APB2ENR |= RCC_APB2ENR_ADCEN;
+}
+
+void myDAC_Init() {
+	/* Enable clock for DAC */
+	RCC->APB1ENR |= RCC_APB1ENR_DACEN;
+}
+
 void myGPIOA_Init()
 {
 	/* Enable clock for GPIOA peripheral */
@@ -130,6 +146,12 @@ void myGPIOA_Init()
 
 	/* Configure PA0 as input */
 	GPIOA->MODER &= ~(GPIO_MODER_MODER0);
+
+	/* Configure PA4 as put */
+	GPIOA->MODER |= 0x300;
+
+	/* Configure PA1 as put */
+	GPIOA->MODER |= 0xC;
 
 	/* Set PA0 to pull-down*/
 	GPIOA->PUPDR |= GPIO_PUPDR_PUPDR0;
@@ -143,8 +165,14 @@ void myGPIOB_Init()
 	/* Configure PB2 as input */
 	GPIOB->MODER &= ~(GPIO_MODER_MODER2);
 
+	/* Configure PB3 as input */
+	GPIOB->MODER &= ~(GPIO_MODER_MODER3);
+
 	/* Ensure no pull-up/pull-down for PB2 */
 	GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR2);
+
+	/* Ensure no pull-up/pull-down for PB3 */
+	GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR3);
 }
 
 
@@ -190,11 +218,17 @@ void myEXTI_Init()
 	/* Map EXTI2 line to PB2 */
 	SYSCFG->EXTICR[0] |= (SYSCFG_EXTICR1_EXTI2_PB);
 
+	/* Map EXTI3 line to PB3 */
+	SYSCFG->EXTICR[0] |= (SYSCFG_EXTICR1_EXTI3_PB);
+
 	/* EXTI0 line interrupts: set rising-edge trigger */
 	EXTI->RTSR |= EXTI_RTSR_TR0;
 
 	/* EXTI2 line interrupts: set rising-edge trigger */
 	EXTI->RTSR |= EXTI_RTSR_TR2;
+
+	/* EXTI3 line interrupts: set rising-edge trigger */
+	EXTI->RTSR |= EXTI_RTSR_TR3;
 
 	/* Unmask interrupts from EXTI0 line */
 	EXTI->IMR |= EXTI_IMR_MR0;
@@ -241,7 +275,10 @@ void EXTI0_1_IRQHandler()
 	/* Check if EXTI0 interrupt pending flag is set */
 	if ((EXTI->PR & EXTI_PR_PR0) != 0)
 		{
+			/* Flip masking interrupts for EXTI2 and EXTI3 */
 			EXTI->IMR ^= (EXTI_IMR_MR2 | EXTI_IMR_MR3);
+
+			/* Clear flag */
 			EXTI->PR = EXTI_PR_PR0;
 		}
 }
@@ -251,7 +288,6 @@ void EXTI2_3_IRQHandler()
 {
 	// Declare/initialize your local variables here...
 	float timer;
-	float period;
 	float frequency;
 
 	/* Check if EXTI2 interrupt pending flag is set */
@@ -266,39 +302,31 @@ void EXTI2_3_IRQHandler()
 			TIM2->CR1 &= ~(TIM_CR1_CEN);
 			timer = TIM2->CNT;
 
-			period = timer / 48000000;
 			frequency = 1/(timer / 48000000);
 
-			trace_printf("Signal Period: %.3f seconds\n", period);
 			trace_printf("Signal Frequency: %.3f Hz\n", frequency);
 			first_edge = 1;
 		}
 		EXTI->PR = EXTI_PR_PR2;
-
-		//
-		// 1. If this is the first edge:
-		//	- Clear count register (TIM2->CNT).
-		//	- Start timer (TIM2->CR1).
-		//    Else (this is the second edge):
-		//	- Stop timer (TIM2->CR1).
-		//	- Read out count register (TIM2->CNT).
-		//	- Calculate signal period and frequency.
-		//	- Print calculated values to the console.
-		//	  NOTE: Function trace_printf does not work
-		//	  with floating-point numbers: you must use
-		//	  "unsigned int" type to print your signal
-		//	  period and frequency.
-		//
-		// 2. Clear EXTI2 interrupt pending flag (EXTI->PR).
-		// NOTE: A pending register (PR) bit is cleared
-		// by writing 1 to it.
-		//
 	}
 
 	/* Check if EXTI3 interrupt pending flag is set */
 	if ((EXTI->PR & EXTI_PR_PR3) != 0)
 	{
-		// 555 timer code
+		if (first_edge) {
+			TIM2->CNT = 0x00;
+			TIM2->CR1 |= TIM_CR1_CEN;
+			first_edge = 0;
+		} else {
+			TIM2->CR1 &= ~(TIM_CR1_CEN);
+			timer = TIM2->CNT;
+
+			frequency = 1/(timer / 48000000);
+
+			trace_printf("Signal Frequency: %.3f Hz\n", frequency);
+			first_edge = 1;
+		}
+		EXTI->PR = EXTI_PR_PR3;
 	}
 }
 
