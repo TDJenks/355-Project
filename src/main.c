@@ -46,6 +46,7 @@
 /* Maximum possible setting for overflow */
 #define myTIM2_PERIOD ((uint32_t)0xFFFFFFFF)
 
+void myGPIOA_Init(void);
 void myGPIOB_Init(void);
 void myTIM2_Init(void);
 void myEXTI_Init(void);
@@ -84,7 +85,7 @@ void SystemClock48MHz( void )
 //
 // Switch the processor to the PLL clock source
 //
-    RCC->CFGR = ( RCC->CFGR & (~RCC_CFGR_SW_Msk)) | RCC_CFGR_SW_PLL;
+    RCC->CFGR = ( RCC->CFGR & (~RCC_CFGR_SW)) | RCC_CFGR_SW_PLL;
 //
 // Update the system with the new clock frequency
 //
@@ -105,7 +106,7 @@ int main(int argc, char* argv[])
 	trace_printf("System clock: %u Hz\n", SystemCoreClock);
 
         RCC->APB2ENR |= RCC_APB2ENR_SYSCFGCOMPEN;  /* Enable SYSCFG clock */
-
+    myGPIOA_Init();		/* Initialize I/O port PA */
 	myGPIOB_Init();		/* Initialize I/O port PB */
 	myTIM2_Init();		/* Initialize timer TIM2 */
 	myEXTI_Init();		/* Initialize EXTI */
@@ -122,37 +123,43 @@ int main(int argc, char* argv[])
 
 }
 
+void myGPIOA_Init()
+{
+	/* Enable clock for GPIOA peripheral */
+	RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+
+	/* Configure PA0 as input */
+	GPIOA->MODER &= ~(GPIO_MODER_MODER0);
+
+	/* Set PA0 to pull-down*/
+	GPIOA->PUPDR |= GPIO_PUPDR_PUPDR0;
+}
 
 void myGPIOB_Init()
 {
 	/* Enable clock for GPIOB peripheral */
-	// Relevant register: RCC->AHBENR
 	RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
 
 	/* Configure PB2 as input */
-	// Relevant register: GPIOB->MODER
-	GPIOB->MODER &= ~(GPIO_MODER_MODER2_Msk);
+	GPIOB->MODER &= ~(GPIO_MODER_MODER2);
 
 	/* Ensure no pull-up/pull-down for PB2 */
-	// Relevant register: GPIOB->PUPDR
-	GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR2_Msk);
+	GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR2);
 }
 
 
 void myTIM2_Init()
 {
 	/* Enable clock for TIM2 peripheral */
-	// Relevant register: RCC->APB1ENR
-	RCC->APB1ENR |= RCC_APB1ENR_TIM2EN_Msk;
+	RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
 
 	/* Configure TIM2: buffer auto-reload, count up, stop on overflow,
 	 * enable update events, interrupt on overflow only */
-	// Relevant register: TIM2->CR1
-	TIM2->CR1 |= TIM_CR1_ARPE_Msk; // buffer auto reload enabled
-	TIM2->CR1 &= ~(TIM_CR1_DIR_Msk); // count up
-	TIM2->CR1 |= TIM_CR1_OPM_Msk; // stop on next update event
-	TIM2->CR1 &= ~(TIM_CR1_UDIS_Msk); // enable update events
-	TIM2->CR1 |= TIM_CR1_URS_Msk; // update interrupt on overflow only
+	TIM2->CR1 |= TIM_CR1_ARPE; // buffer auto reload enabled
+	TIM2->CR1 &= ~(TIM_CR1_DIR); // count up
+	TIM2->CR1 |= TIM_CR1_OPM; // stop on next update event
+	TIM2->CR1 &= ~(TIM_CR1_UDIS); // enable update events
+	TIM2->CR1 |= TIM_CR1_URS; // update interrupt on overflow only
 
 	/* Set clock prescaler value */
 	TIM2->PSC = myTIM2_PRESCALER;
@@ -160,43 +167,54 @@ void myTIM2_Init()
 	TIM2->ARR = myTIM2_PERIOD;
 
 	/* Update timer registers */
-	// Relevant register: TIM2->EGR
-	TIM2->EGR |= TIM_EGR_UG_Msk;
+	TIM2->EGR |= TIM_EGR_UG;
+
 
 	/* Assign TIM2 interrupt priority = 0 in NVIC */
-	// Relevant register: NVIC->IP[3], or use NVIC_SetPriority
 	NVIC_SetPriority(TIM2_IRQn, 0);
 
 	/* Enable TIM2 interrupts in NVIC */
-	// Relevant register: NVIC->ISER[0], or use NVIC_EnableIRQ
 	NVIC_EnableIRQ(TIM2_IRQn);
 
 	/* Enable update interrupt generation */
-	// Relevant register: TIM2->DIER
-	TIM2->DIER |= TIM_DIER_TIE_Msk;
+	TIM2->DIER |= TIM_DIER_TIE;
+
 }
 
 
 void myEXTI_Init()
 {
+	/* Map EXTI0 line to PA0 */
+	SYSCFG->EXTICR[0] |= (SYSCFG_EXTICR1_EXTI0_PA);
+
 	/* Map EXTI2 line to PB2 */
-	// Relevant register: SYSCFG->EXTICR[0]
 	SYSCFG->EXTICR[0] |= (SYSCFG_EXTICR1_EXTI2_PB);
 
+	/* EXTI0 line interrupts: set rising-edge trigger */
+	EXTI->RTSR |= EXTI_RTSR_TR0;
+
 	/* EXTI2 line interrupts: set rising-edge trigger */
-	// Relevant register: EXTI->RTSR
-	EXTI->RTSR |= EXTI_RTSR_TR2_Msk;
+	EXTI->RTSR |= EXTI_RTSR_TR2;
+
+	/* Unmask interrupts from EXTI0 line */
+	EXTI->IMR |= EXTI_IMR_MR0;
 
 	/* Unmask interrupts from EXTI2 line */
-	// Relevant register: EXTI->IMR
-	EXTI->IMR |= EXTI_IMR_MR2_Msk;
+	EXTI->IMR |= EXTI_IMR_MR2;
 
-	/* Assign EXTI2 interrupt priority = 0 in NVIC */
-	// Relevant register: NVIC->IP[2], or use NVIC_SetPriority
-	NVIC_SetPriority(EXTI2_3_IRQn, 0);
+	/* Mask interrupts from EXTI3 line */
+	EXTI->IMR &= ~(EXTI_IMR_MR3);
 
-	/* Enable EXTI2 interrupts in NVIC */
-	// Relevant register: NVIC->ISER[0], or use NVIC_EnableIRQ
+	/* Assign EXTI0 interrupt priority = 0 in NVIC */
+	NVIC_SetPriority(EXTI0_1_IRQn, 0);
+
+	/* Assign EXTI2 & EXTI3 interrupt priority = 1 in NVIC */
+	NVIC_SetPriority(EXTI2_3_IRQn, 1);
+
+	/* Enable EXTI0 interrupts in NVIC */
+	NVIC_EnableIRQ(EXTI0_1_IRQn);
+
+	/* Enable EXTI2 & EXTI3 interrupts in NVIC */
 	NVIC_EnableIRQ(EXTI2_3_IRQn);
 
 }
@@ -211,15 +229,22 @@ void TIM2_IRQHandler()
 		trace_printf("\n*** Overflow! ***\n");
 
 		/* Clear update interrupt flag */
-		// Relevant register: TIM2->SR
-		TIM2->SR &= ~(TIM_SR_UIF_Msk);
+		TIM2->SR &= ~(TIM_SR_UIF);
 
 		/* Restart stopped timer */
-		// Relevant register: TIM2->CR1
-		TIM2->CR1 |= TIM_CR1_CEN_Msk;
+		TIM2->CR1 |= TIM_CR1_CEN;
 	}
 }
 
+void EXTI0_1_IRQHandler()
+{
+	/* Check if EXTI0 interrupt pending flag is set */
+	if ((EXTI->PR & EXTI_PR_PR0) != 0)
+		{
+			EXTI->IMR ^= (EXTI_IMR_MR2 | EXTI_IMR_MR3);
+			EXTI->PR = EXTI_PR_PR0;
+		}
+}
 
 /* This handler is declared in system/src/cmsis/vectors_stm32f051x8.c */
 void EXTI2_3_IRQHandler()
@@ -229,16 +254,16 @@ void EXTI2_3_IRQHandler()
 	float period;
 	float frequency;
 
-	/* Check if EXTI2 interrupt pending flag is indeed set */
+	/* Check if EXTI2 interrupt pending flag is set */
 	if ((EXTI->PR & EXTI_PR_PR2) != 0)
 	{
 
 		if (first_edge) {
 			TIM2->CNT = 0x00;
-			TIM2->CR1 |= TIM_CR1_CEN_Msk;
+			TIM2->CR1 |= TIM_CR1_CEN;
 			first_edge = 0;
 		} else {
-			TIM2->CR1 &= ~(TIM_CR1_CEN_Msk);
+			TIM2->CR1 &= ~(TIM_CR1_CEN);
 			timer = TIM2->CNT;
 
 			period = timer / 48000000;
@@ -268,6 +293,12 @@ void EXTI2_3_IRQHandler()
 		// NOTE: A pending register (PR) bit is cleared
 		// by writing 1 to it.
 		//
+	}
+
+	/* Check if EXTI3 interrupt pending flag is set */
+	if ((EXTI->PR & EXTI_PR_PR3) != 0)
+	{
+		// 555 timer code
 	}
 }
 
