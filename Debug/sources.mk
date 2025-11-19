@@ -36,6 +36,7 @@ CPP_DEPS :=
 # Every subdirectory with source files must be described here
 SUBDIRS := \
 src \
+system/include/stm32f0-hal \
 system/src/cmsis \
 system/src/cortexm \
 system/src/diag \
