@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include "diag/Trace.h"
 #include <string.h>
+#include <math.h>
 #include "cmsis/cmsis_device.h"
 
 
@@ -58,14 +59,16 @@ void myEXTI_Init(void);
 uint16_t adc_read(void);
 void dac_write(uint16_t);
 
-void oled_Write(unsigned char);
+
 void oled_Write_Cmd(unsigned char);
 void oled_Write_Data(unsigned char);
 
 void oled_config(void);
 
-void refresh_OLED(void);
+void refresh_OLED(float,float);
 
+static float adc_to_voltage(uint16_t adc_val);
+static float adc_to_ohms(uint16_t adc_val);
 
 SPI_HandleTypeDef SPI_Handle;
 
@@ -73,29 +76,24 @@ SPI_HandleTypeDef SPI_Handle;
 //
 // LED Display initialization commands
 //
-unsigned char oled_init_cmds[] =
-{
+const uint8_t oled_init_cmds[] = {
     0xAE,
     0x20, 0x00,
     0x40,
-    0xA0 | 0x01,
-    0xA8, 0x40 - 1,
-    0xC0 | 0x08,
+    0xA1,
+    0xC8,
+    0xA8, 0x3F,
     0xD3, 0x00,
-    0xDA, 0x32,
+    0xDA, 0x12,
     0xD5, 0x80,
-    0xD9, 0x22,
+    0xD9, 0xF1,
     0xDB, 0x30,
-    0x81, 0xFF,
+    0x81, 0x7F,
     0xA4,
     0xA6,
-    0xAD, 0x30,
-    0x8D, 0x10,
-    0xAE | 0x01,
-    0xC0,
-    0xA0
+    0x8D, 0x14,
+    0xAF
 };
-
 
 //
 // Character specifications for LED Display (1 row = 8 bytes = 1 ASCII character)
@@ -285,6 +283,14 @@ unsigned int Freq = 0;
 unsigned int Res = 0;
 uint16_t last_pot = 0;
 
+volatile uint8_t active_source = 0;  // 0 = PB2, 1 = PB3
+
+volatile uint8_t first_edge_chan[2] = {1, 1};
+volatile uint32_t captured_timer_chan[2] = {0, 0};
+volatile float measured_freq_chan[2] = {0.0f, 0.0f};
+
+#define R_REF 10000.0f   // Change if your reference resistor is different
+
 
 int main(int argc, char* argv[])
 {
@@ -306,19 +312,53 @@ int main(int argc, char* argv[])
 
     oled_config();		/* configure OLED */
 
+    uint32_t counter = 0;
 
 	while (1)
 	{
 		uint16_t value = adc_read();
 		dac_write(value);
-		if (last_pot != value) {
-			trace_printf("R: %5u Ohms\n", (value / 4095.0) * 3.3);
-			last_pot = value;
+
+		float resistance = adc_to_ohms(value);
+
+		counter++;
+
+		if(counter >= 25)
+		{
+			counter = 0;
+
+			float freq = measured_freq_chan[active_source]; // depends on current active interrupt line
+
+			refresh_OLED(freq, resistance);
+
+			trace_printf("\n---- Measurement ----\n");
+
+			trace_printf("Frequency: %.2f Hz\n", freq);
+
+			 if (isfinite(resistance))
+				trace_printf("Resistance: %.2f Ohms\n", resistance);
+			else
+				trace_printf("Resistance: OPEN CIRCUIT\n"); //board specific
 		}
+		for (volatile int i = 0; i < 20000; i++);
 	}
 
 	return 0;
 
+}
+
+static float adc_to_voltage(uint16_t adc_val)
+{
+    return (3.3f * adc_val) / 4095.0f;
+}
+
+static float adc_to_ohms(uint16_t adc_val)
+{
+    float v = adc_to_voltage(adc_val);
+
+    if (v >= 3.299f) return INFINITY;
+
+    return R_REF * (v / (3.3f - v));
 }
 
 void myADC_Init()
@@ -329,7 +369,6 @@ void myADC_Init()
 	/* Calibration */
 	if (ADC1->CR & ADC_CR_ADEN)
 		ADC1->CR |= ADC_CR_ADDIS;
-
 	ADC1->CR |= ADC_CR_ADCAL;
 	while (ADC1->CR & ADC_CR_ADCAL);
 
@@ -403,23 +442,69 @@ void myGPIOB_Init()
 	/* Configure PB3 as input */
 	GPIOB->MODER &= ~(GPIO_MODER_MODER3);
 
-	/* Configure PB8, PB9 and PB11 as output */
-	GPIOB->MODER |= (GPIO_MODER_MODER8 | GPIO_MODER_MODER9 | GPIO_MODER_MODER11);
-
-	/* Configure PB13 and PB15 as alternate function */
-	GPIOB->MODER |= 0x80000000 | 0x08000000;
-
 	/* Ensure no pull-up/pull-down for PB2 */
 	GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR2);
 
 	/* Ensure no pull-up/pull-down for PB3 */
 	GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR3);
+
+	GPIOB->MODER &= ~(GPIO_MODER_MODER8 | GPIO_MODER_MODER9 | GPIO_MODER_MODER11);  // clear bits
+	GPIOB->MODER |=  (GPIO_MODER_MODER8_0 | GPIO_MODER_MODER9_0 | GPIO_MODER_MODER11_0); // set as OUTPUT
+
+	// Push-pull outputs
+	GPIOB->OTYPER &= ~(GPIO_OTYPER_OT_8 | GPIO_OTYPER_OT_9 | GPIO_OTYPER_OT_11);
+
+	// Medium speed
+	GPIOB->OSPEEDR |= (GPIO_OSPEEDER_OSPEEDR8_0 | GPIO_OSPEEDER_OSPEEDR9_0 | GPIO_OSPEEDER_OSPEEDR11_0);
+
+	// No pull-up/pull-down
+	GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR8 | GPIO_PUPDR_PUPDR9 | GPIO_PUPDR_PUPDR11);
+
+	// Set CS high, DC low, RES high
+	GPIOB->BSRR = GPIO_BSRR_BS_8;  // CS = 1
+	GPIOB->BSRR = GPIO_BSRR_BR_9;  // DC = 0
+	GPIOB->BSRR = GPIO_BSRR_BS_11; // RES = 1
+
+    // --- PB13 = SCK, PB15 = MOSI (SPI2, AF0) ---
+    // Set mode = Alternate Function
+    GPIOB->MODER &= ~(GPIO_MODER_MODER13 | GPIO_MODER_MODER15);
+    GPIOB->MODER |= (GPIO_MODER_MODER13_1 | GPIO_MODER_MODER15_1);  // AF mode
+
+    // High speed
+    GPIOB->OSPEEDR |= (GPIO_OSPEEDER_OSPEEDR13 | GPIO_OSPEEDER_OSPEEDR15);
+
+    // Push-pull
+    GPIOB->OTYPER &= ~(GPIO_OTYPER_OT_13 | GPIO_OTYPER_OT_15);
+
+    // No pull-up/pull-down
+    GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR13 | GPIO_PUPDR_PUPDR15);
+
+    // Select AF0 for SPI2 on PB13/PB15
+    GPIOB->AFR[1] &= ~(0xF << ((13 - 8) * 4));
+    GPIOB->AFR[1] &= ~(0xF << ((15 - 8) * 4));
+    // AF0 is 0x0, so no need to OR anything
 }
 
 void mySPI_Init()
 {
 	/* Enable clock for SPI peripheral */
 	RCC->APB1ENR |= RCC_APB1ENR_SPI2EN;
+
+    SPI_Handle.Instance = SPI2;
+
+    SPI_Handle.Init.Direction = SPI_DIRECTION_1LINE;
+    SPI_Handle.Init.Mode = SPI_MODE_MASTER;
+    SPI_Handle.Init.DataSize = SPI_DATASIZE_8BIT;
+    SPI_Handle.Init.CLKPolarity = SPI_POLARITY_LOW;
+    SPI_Handle.Init.CLKPhase = SPI_PHASE_1EDGE;
+    SPI_Handle.Init.NSS = SPI_NSS_SOFT;
+    SPI_Handle.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+    SPI_Handle.Init.FirstBit = SPI_FIRSTBIT_MSB;
+    SPI_Handle.Init.TIMode = SPI_TIMODE_DISABLE;
+    SPI_Handle.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+    SPI_Handle.Init.CRCPolynomial = 7;
+
+    HAL_SPI_Init(&SPI_Handle);
 }
 
 
@@ -459,7 +544,7 @@ void myTIM2_Init()
 
 void myEXTI_Init()
 {
-	/* Map EXTI0 line to PA0 PB2 and PB3*/
+	/* Map EXTI line to PA0 PB2 and PB3*/
 	SYSCFG->EXTICR[0] = (SYSCFG_EXTICR1_EXTI0_PA
 						| SYSCFG_EXTICR1_EXTI2_PB
 						| SYSCFG_EXTICR1_EXTI3_PB);
@@ -517,10 +602,15 @@ void TIM2_IRQHandler()
 void EXTI0_1_IRQHandler()
 {
 	/* Check if EXTI0 interrupt pending flag is set */
+
 	if ((EXTI->PR & EXTI_PR_PR0) != 0)
 		{
 			/* Flip masking interrupts for EXTI2 and EXTI3 */
 			EXTI->IMR ^= (EXTI_IMR_MR2 | EXTI_IMR_MR3);
+
+			// 0 = PB2, 1 = PB3
+			if(active_source == 0) { active_source = 1; }
+			else { active_source = 0; }
 
 			/* Clear flag */
 			EXTI->PR = EXTI_PR_PR0;
@@ -530,28 +620,49 @@ void EXTI0_1_IRQHandler()
 /* This handler is declared in system/src/cmsis/vectors_stm32f051x8.c */
 void EXTI2_3_IRQHandler()
 {
-	// Declare/initialize your local variables here...
-	float timer;
-	float frequency;
 
-	/* Check if EXTI3 interrupt pending flag is set */
-	if (((EXTI->PR & EXTI_PR_PR2) != 0) || ((EXTI->PR & EXTI_PR_PR3) != 0))
+	if ((EXTI->PR & EXTI_PR_PR2) != 0 )
 	{
-		if (first_edge) {
-			TIM2->CNT = 0x00;
+		if (first_edge_chan[0])
+		{
+			TIM2->CNT = 0;
 			TIM2->CR1 |= TIM_CR1_CEN;
-			first_edge = 0;
-		} else {
-			TIM2->CR1 &= ~(TIM_CR1_CEN);
-			timer = TIM2->CNT;
-
-			frequency = 48000000 / timer;
-
-			trace_printf("Signal Frequency: %.3f Hz\n", frequency);
-			first_edge = 1;
+			first_edge_chan[0] = 0;
 		}
-		if ((EXTI->PR & EXTI_PR_PR2) != 0) EXTI->PR = EXTI_PR_PR2;
-		if ((EXTI->PR & EXTI_PR_PR3) != 0) EXTI->PR = EXTI_PR_PR3;
+		else
+		{
+			TIM2->CR1 &= ~TIM_CR1_CEN;
+			uint32_t ticks = TIM2->CNT;
+			if (ticks == 0) ticks = 1;
+
+			measured_freq_chan[0] = (float)SystemCoreClock / (float)ticks;
+			first_edge_chan[0] = 1;
+		}
+
+		EXTI->PR = EXTI_PR_PR2;
+	}
+
+	// PB3 -> index 1
+	if ((EXTI->PR & EXTI_PR_PR3) != 0 )
+	{
+		if (first_edge_chan[1])
+		{
+			TIM2->CNT = 0;
+			TIM2->CR1 |= TIM_CR1_CEN;
+			first_edge_chan[1] = 0;
+
+		}
+		else
+		{
+			TIM2->CR1 &= ~TIM_CR1_CEN;
+			uint32_t ticks = TIM2->CNT;
+			if (ticks == 0) ticks = 1;
+
+			measured_freq_chan[1] = (float)SystemCoreClock / (float)ticks;
+			first_edge_chan[1] = 1;
+		}
+
+		EXTI->PR = EXTI_PR_PR3;
 	}
 
 }
@@ -561,76 +672,55 @@ void EXTI2_3_IRQHandler()
 //
 
 
-void refresh_OLED( void )
+void refresh_OLED(float freq, float ohms)
 {
-    // Buffer size = at most 16 characters per PAGE + terminating '\0'
     unsigned char Buffer[17];
+    uint8_t start_col = 2;
 
-    snprintf( Buffer, sizeof( Buffer ), "R: %5u Ohms", Res );
-    /* Buffer now contains your character ASCII codes for LED Display
-       - select PAGE (LED Display line) and set starting SEG (column)
-       - for each c = ASCII code = Buffer[0], Buffer[1], ...,
-           send 8 bytes in Characters[c][0-7] to LED Display
-    */
+    // ---- PAGE 0: Resistance ----
+    oled_Write_Cmd(0xB0 | 0);   // Page 0
+    oled_Write_Cmd(start_col & 0x0F);
+    oled_Write_Cmd(0x10);
 
+    snprintf(Buffer, sizeof(Buffer), "R:%6.1f ", ohms);
 
+    for (int i = 0; Buffer[i] != 0; i++)
+    {
+        unsigned char c = Buffer[i];
+        for (int col = 0; col < 8; col++)
+            oled_Write_Data(Characters[c][col]);
+    }
 
+    // ---- PAGE 2: Frequency ----
+    oled_Write_Cmd(0xB0 | 2);   // Page 2 (skip one row for spacing)
+    oled_Write_Cmd(start_col & 0x0F);
+    oled_Write_Cmd(0x10);
 
-    snprintf( Buffer, sizeof( Buffer ), "F: %5u Hz", Freq );
-    /* Buffer now contains your character ASCII codes for LED Display
-       - select PAGE (LED Display line) and set starting SEG (column)
-       - for each c = ASCII code = Buffer[0], Buffer[1], ...,
-           send 8 bytes in Characters[c][0-7] to LED Display
-    */
+    snprintf(Buffer, sizeof(Buffer), "F:%6.1fHz", freq);
 
-
-
-
-	/* Wait for ~100 ms (for example) to get ~10 frames/sec refresh rate
-       - You should use TIM3 to implement this delay (e.g., via polling)
-    */
-
-
-
+    for (int i = 0; Buffer[i] != 0; i++)
+    {
+        unsigned char c = Buffer[i];
+        for (int col = 0; col < 8; col++)
+            oled_Write_Data(Characters[c][col]);
+    }
 }
 
 
-void oled_Write_Cmd( unsigned char cmd )
+void oled_Write_Cmd(uint8_t data)
 {
-    // make PB8 = CS# = 1
-    // make PB9 = D/C# = 0
-    // make PB8 = CS# = 0
-    oled_Write( cmd );
-    // make PB8 = CS# = 1
+    GPIOB->BSRR = GPIO_BSRR_BR_9;  // DC = 0
+    GPIOB->BSRR = GPIO_BSRR_BR_8;  // CS = 0
+    HAL_SPI_Transmit(&SPI_Handle, &data, 1, HAL_MAX_DELAY);
+    GPIOB->BSRR = GPIO_BSRR_BS_8;  // CS = 1
 }
 
-void oled_Write_Data( unsigned char data )
+void oled_Write_Data(uint8_t data)
 {
-    // make PB8 = CS# = 1
-    // make PB9 = D/C# = 1
-    // make PB8 = CS# = 0
-    oled_Write( data );
-    // make PB8 = CS# = 1
-}
-
-
-void oled_Write( unsigned char Value )
-{
-
-    /* Wait until SPI2 is ready for writing (TXE = 1 in SPI2_SR) */
-
-
-
-    /* Send one 8-bit character:
-       - This function also sets BIDIOE = 1 in SPI2_CR1
-    */
-    HAL_SPI_Transmit( &SPI_Handle, &Value, 1, HAL_MAX_DELAY );
-
-
-    /* Wait until transmission is complete (TXE = 1 in SPI2_SR) */
-
-
-
+    GPIOB->BSRR = GPIO_BSRR_BS_9;  // DC = 1
+    GPIOB->BSRR = GPIO_BSRR_BR_8;  // CS = 0
+    HAL_SPI_Transmit(&SPI_Handle, &data, 1, HAL_MAX_DELAY);
+    GPIOB->BSRR = GPIO_BSRR_BS_8;  // CS = 1
 }
 
 
@@ -641,17 +731,6 @@ void oled_config( void )
 // Don't forget to configure PB13/PB15 as AF0
 // Don't forget to enable SPI2 clock in RCC
 
-    SPI_Handle.Instance = SPI2;
-
-    SPI_Handle.Init.Direction = SPI_DIRECTION_1LINE;
-    SPI_Handle.Init.Mode = SPI_MODE_MASTER;
-    SPI_Handle.Init.DataSize = SPI_DATASIZE_8BIT;
-    SPI_Handle.Init.CLKPolarity = SPI_POLARITY_LOW;
-    SPI_Handle.Init.CLKPhase = SPI_PHASE_1EDGE;
-    SPI_Handle.Init.NSS = SPI_NSS_SOFT;
-    SPI_Handle.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
-    SPI_Handle.Init.FirstBit = SPI_FIRSTBIT_MSB;
-    SPI_Handle.Init.CRCPolynomial = 7;
 
 //
 // Initialize the SPI interface
@@ -669,6 +748,13 @@ void oled_config( void )
        - make pin PB11 = 1, wait for a few ms
     */
 
+    // Reset OLED using PB11
+    GPIOB->BSRR = GPIO_BSRR_BR_11;  // RES = 0
+    for (volatile int i = 0; i < 50000; i++);
+
+    GPIOB->BSRR = GPIO_BSRR_BS_11;  // RES = 1
+    for (volatile int i = 0; i < 50000; i++);
+
 
 //
 // Send initialization commands to LED Display
@@ -678,12 +764,25 @@ void oled_config( void )
         oled_Write_Cmd( oled_init_cmds[i] );
     }
 
+    oled_Write_Cmd(0xAF);
+
+
+    for (int page = 0; page < 8; page++)
+    {
+        oled_Write_Cmd(0xB0 | page);   // Set page
+        oled_Write_Cmd(0x00);          // Lower column
+        oled_Write_Cmd(0x10);          // Upper column
+
+        for (int i = 0; i < 128; i++)
+            oled_Write_Data(0x00);
+    }
 
     /* Fill LED Display data memory (GDDRAM) with zeros:
        - for each PAGE = 0, 1, ..., 7
            set starting SEG = 0
            call oled_Write_Data( 0x00 ) 128 times
     */
+
 
 
 
